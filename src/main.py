@@ -129,7 +129,13 @@ async def chat_command(  # noqa: N802  (discord uses "int" param name)
             auto_archive_duration=60,
         )
         thread_data[thread.id] = ThreadConfig(model, max_tokens, temperature)
-
+       
+        # Ensure config exists for threads that survived a restart
+        if thread.id not in thread_data:
+            thread_data[thread.id] = ThreadConfig(
+                model=DEFAULT_MODEL, max_tokens=512, temperature=1.0
+            )
+            
         # Generate first reply
         async with thread.typing():
             messages = [Message(user=user.name, text=message)]
@@ -182,7 +188,15 @@ async def on_message(msg: DiscordMessage):
         ]
         history = [h for h in history if h]
         history.reverse()
-
+        
+        # ------------------------------------------------------------------
+        # Ensure config exists for threads that were created before a restart
+        if thread.id not in thread_data:
+            thread_data[thread.id] = ThreadConfig(
+                model=DEFAULT_MODEL, max_tokens=512, temperature=1.0
+            )
+        # ------------------------------------------------------------------
+        
         async with thread.typing():
             data = await generate_completion_response(history, thread_data[thread.id])
 

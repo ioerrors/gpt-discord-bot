@@ -90,7 +90,7 @@ async def process_response(
             )
             return
 
-        chunks = split_into_shorter_messages(reply_text, MAX_CHARS_PER_REPLY_MSG)
+        chunks = split_into_shorter_messages(reply_text)   # drop 2nd arg
         if len(chunks) > 1:
             # Keep the extra chunks aside and hint user
             key = (thread.guild.id, thread.id)
