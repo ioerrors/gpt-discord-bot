@@ -1,8 +1,8 @@
 # ───────────────────────────────────────────────────────────────
-#  src/main.py   —  SkippyAI (no‑moderation edition)
+#  src/main.py  —  SkippyAI (no‑moderation, restart‑safe)
 # ───────────────────────────────────────────────────────────────
 from collections import defaultdict
-from typing import Optional, Literal
+from typing import Optional
 
 import asyncio
 import logging
@@ -40,88 +40,78 @@ intents.message_content = True
 
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
-thread_data = defaultdict()
+thread_data: dict[int, ThreadConfig] = defaultdict()
 
-
+# ───────────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
-    logger.info(f"We have logged in as {client.user}. Invite URL: {BOT_INVITE_URL}")
-    # propagate bot name to completion module
+    logger.info(f"Logged in as {client.user}. Invite URL: {BOT_INVITE_URL}")
+
+    # propagate bot name & example convos to completion module
     from src import completion
 
     completion.MY_BOT_NAME = client.user.name
     completion.MY_BOT_EXAMPLE_CONVOS = []
-    for c in EXAMPLE_CONVOS:
-        msgs = []
-        for m in c.messages:
-            user = client.user.name if m.user == "Lenard" else m.user
-            msgs.append(Message(user=user, text=m.text))
+    for convo in EXAMPLE_CONVOS:
+        msgs = [
+            Message(user=(client.user.name if m.user == "Lenard" else m.user), text=m.text)
+            for m in convo.messages
+        ]
         completion.MY_BOT_EXAMPLE_CONVOS.append(Conversation(messages=msgs))
 
     await tree.sync()
 
-
 # ───────────────────────────────────────────────────────────────
-# /chat  slash‑command
+# /chat  slash command
 # ───────────────────────────────────────────────────────────────
-@tree.command(name="chat", description="Create a new thread for conversation")
-@discord.app_commands.checks.has_permissions(send_messages=True, view_channel=True)
+@tree.command(name="chat", description="Start a new SkippyAI thread")
 @discord.app_commands.checks.bot_has_permissions(
     send_messages=True, view_channel=True, manage_threads=True
 )
-@app_commands.describe(message="The first prompt to start the chat with")
-@app_commands.describe(model="The model to use for the chat")
 @app_commands.describe(
-    temperature="Controls randomness (0‑1). Higher = more creative."
+    temperature="Randomness (0‑1). Higher = more creative.",
+    max_tokens="Max tokens SkippyAI may generate in one reply (1‑4096).",
 )
-@app_commands.describe(
-    max_tokens="Max tokens the model may generate per reply (1‑4096)."
-)
-async def chat_command(  # noqa: N802  (discord uses "int" param name)
+async def chat_command(  # noqa: N802 (discord uses "int" param name)
     int: discord.Interaction,
     message: str,
-    model: AVAILABLE_MODELS = DEFAULT_MODEL,
+    model: AVAILABLE_MODELS = "gpt-4o-mini",  # literal so Discord validates
     temperature: Optional[float] = 1.0,
     max_tokens: Optional[int] = 512,
 ):
     try:
-        # Only allow invocations from text channels
         if not isinstance(int.channel, discord.TextChannel):
             return
-
-        # Block guilds not in allow‑list
-        if should_block(guild=int.guild):
+        if should_block(int.guild):
             return
-
-        # Validate numeric params
-        if not 0 <= temperature <= 1:
+        if not 0 <= temperature <= 1 or not 1 <= max_tokens <= 4096:
             await int.response.send_message(
-                f"Invalid temperature {temperature} (0‑1 required)", ephemeral=True
-            )
-            return
-        if not 1 <= max_tokens <= 4096:
-            await int.response.send_message(
-                f"Invalid max_tokens {max_tokens} (1‑4096 required)", ephemeral=True
+                "Invalid temperature or max_tokens range.", ephemeral=True
             )
             return
 
         user = int.user
-        logger.info(f"/chat by {user} – {message[:50]}")
+        logger.info(f"/chat by {user} – {message[:60]}")
 
-        # Build & send an embed summarizing the request
-        embed = discord.Embed(
-            description=f"<@{user.id}> wants to chat! 🤖💬",
-            color=discord.Color.green(),
+        # 1️⃣  Defer immediately so Discord gets an ACK
+        await int.response.defer()
+
+        # Build a pretty embed summarising the request
+        embed = (
+            discord.Embed(
+                description=f"<@{user.id}> wants to chat! 🤖💬",
+                color=discord.Color.green(),
+            )
+            .add_field(name="model", value=model)
+            .add_field(name="temperature", value=temperature, inline=True)
+            .add_field(name="max_tokens", value=max_tokens, inline=True)
+            .add_field(name=user.name, value=message)
         )
-        embed.add_field(name="model", value=model)
-        embed.add_field(name="temperature", value=temperature, inline=True)
-        embed.add_field(name="max_tokens", value=max_tokens, inline=True)
-        embed.add_field(name=user.name, value=message)
 
-        await int.response.send_message(embed=embed)
-        response_msg = await int.original_response()
+        # 2️⃣  Send follow‑up message (becomes thread starter)
+        response_msg = await int.followup.send(embed=embed)
 
-        # Create a thread for the conversation
+        # Create the thread
         thread = await response_msg.create_thread(
             name=f"{ACTIVATE_THREAD_PREFX} {user.name[:20]} - {message[:30]}",
             reason="SkippyAI chat",
@@ -129,23 +119,19 @@ async def chat_command(  # noqa: N802  (discord uses "int" param name)
             auto_archive_duration=60,
         )
         thread_data[thread.id] = ThreadConfig(model, max_tokens, temperature)
-       
-        # Ensure config exists for threads that survived a restart
-        if thread.id not in thread_data:
-            thread_data[thread.id] = ThreadConfig(
-                model=DEFAULT_MODEL, max_tokens=512, temperature=1.0
-            )
-            
+
         # Generate first reply
         async with thread.typing():
-            messages = [Message(user=user.name, text=message)]
-            data = await generate_completion_response(messages, thread_data[thread.id])
+            data = await generate_completion_response(
+                [Message(user=user.name, text=message)],
+                thread_data[thread.id],
+            )
             await process_response(thread, data)
 
     except Exception as exc:  # noqa: BLE001
         logger.exception(exc)
-        await int.response.send_message(f"Error starting chat: {exc}", ephemeral=True)
-
+        if not int.response.is_done():
+            await int.response.send_message(f"Error: {exc}", ephemeral=True)
 
 # ───────────────────────────────────────────────────────────────
 # Handle every message inside a thread the bot owns
@@ -153,61 +139,57 @@ async def chat_command(  # noqa: N802  (discord uses "int" param name)
 @client.event
 async def on_message(msg: DiscordMessage):
     try:
-        if msg.author == client.user:
-            return
-        if not isinstance(msg.channel, discord.Thread):
+        if msg.author == client.user or not isinstance(msg.channel, discord.Thread):
             return
 
-        thread = msg.channel
-        if thread.owner_id != client.user.id:
-            return
-        if thread.archived or thread.locked or not thread.name.startswith(
-            ACTIVATE_THREAD_PREFX
+        thread: discord.Thread = msg.channel
+        if (
+            thread.owner_id != client.user.id
+            or thread.archived
+            or thread.locked
+            or not thread.name.startswith(ACTIVATE_THREAD_PREFX)
         ):
+            return
+        if should_block(msg.guild):
             return
         if thread.message_count > MAX_THREAD_MESSAGES:
             await close_thread(thread)
             return
-        if should_block(guild=msg.guild):
-            return
 
-        # Optional batching delay
+        # Ensure config exists for threads across restarts
+        if thread.id not in thread_data:
+            thread_data[thread.id] = ThreadConfig(
+                model=DEFAULT_MODEL, max_tokens=512, temperature=1.0
+            )
+
+        # Optional batching
         if SECONDS_DELAY_RECEIVING_MSG:
             await asyncio.sleep(SECONDS_DELAY_RECEIVING_MSG)
             if is_last_message_stale(msg, thread.last_message, client.user.id):
                 return
 
         logger.info(
-            f"Processing thread msg – {msg.author}: {msg.content[:60]} ({thread.jump_url})"
+            f"Thread msg – {msg.author}: {msg.content[:60]} ({thread.jump_url})"
         )
 
-        # Reconstruct conversation context
+        # Build conversation context
         history = [
-            discord_message_to_message(m)
+            m
             async for m in thread.history(limit=MAX_THREAD_MESSAGES)
         ]
-        history = [h for h in history if h]
+        history = [discord_message_to_message(m) for m in history if m]
         history.reverse()
-        
-        # ------------------------------------------------------------------
-        # Ensure config exists for threads that were created before a restart
-        if thread.id not in thread_data:
-            thread_data[thread.id] = ThreadConfig(
-                model=DEFAULT_MODEL, max_tokens=512, temperature=1.0
-            )
-        # ------------------------------------------------------------------
-        
-        async with thread.typing():
-            data = await generate_completion_response(history, thread_data[thread.id])
 
+        async with thread.typing():
+            data = await generate_completion_response(
+                history, thread_data[thread.id]
+            )
         if is_last_message_stale(msg, thread.last_message, client.user.id):
             return
-
         await process_response(thread, data)
 
     except Exception as exc:  # noqa: BLE001
         logger.exception(exc)
-
 
 # ───────────────────────────────────────────────────────────────
 client.run(DISCORD_BOT_TOKEN)
