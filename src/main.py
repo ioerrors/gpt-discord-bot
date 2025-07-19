@@ -1,5 +1,5 @@
 # ───────────────────────────────────────────────────────────────
-#  src/main.py  —  SkippyAI (no‑moderation, restart‑safe)
+#  src/main.py  —  SkippyAI (restart‑safe, no‑moderation)
 # ───────────────────────────────────────────────────────────────
 from collections import defaultdict
 from typing import Optional
@@ -47,17 +47,21 @@ thread_data: dict[int, ThreadConfig] = defaultdict()
 async def on_ready():
     logger.info(f"Logged in as {client.user}. Invite URL: {BOT_INVITE_URL}")
 
-    # propagate bot name & example convos to completion module
+    # propagate bot name & examples to completion.py
     from src import completion
-
     completion.MY_BOT_NAME = client.user.name
-    completion.MY_BOT_EXAMPLE_CONVOS = []
-    for convo in EXAMPLE_CONVOS:
-        msgs = [
-            Message(user=(client.user.name if m.user == "Lenard" else m.user), text=m.text)
-            for m in convo.messages
-        ]
-        completion.MY_BOT_EXAMPLE_CONVOS.append(Conversation(messages=msgs))
+    completion.MY_BOT_EXAMPLE_CONVOS = [
+        Conversation(
+            messages=[
+                Message(
+                    user=(client.user.name if m.user == "Lenard" else m.user),
+                    text=m.text,
+                )
+                for m in convo.messages
+            ]
+        )
+        for convo in EXAMPLE_CONVOS
+    ]
 
     await tree.sync()
 
@@ -72,10 +76,10 @@ async def on_ready():
     temperature="Randomness (0‑1). Higher = more creative.",
     max_tokens="Max tokens SkippyAI may generate in one reply (1‑4096).",
 )
-async def chat_command(  # noqa: N802 (discord uses "int" param name)
+async def chat_command(  # noqa: N802
     int: discord.Interaction,
     message: str,
-    model: AVAILABLE_MODELS = "gpt-4o-mini",  # literal so Discord validates
+    model: AVAILABLE_MODELS = "gpt-4o-mini",  # literal default
     temperature: Optional[float] = 1.0,
     max_tokens: Optional[int] = 512,
 ):
@@ -86,17 +90,14 @@ async def chat_command(  # noqa: N802 (discord uses "int" param name)
             return
         if not 0 <= temperature <= 1 or not 1 <= max_tokens <= 4096:
             await int.response.send_message(
-                "Invalid temperature or max_tokens range.", ephemeral=True
+                "Invalid temperature or max_tokens.", ephemeral=True
             )
             return
 
         user = int.user
         logger.info(f"/chat by {user} – {message[:60]}")
 
-        # 1️⃣  Defer immediately so Discord gets an ACK
-        await int.response.defer()
-
-        # Build a pretty embed summarising the request
+        # Send an embed immediately (within 3 s)
         embed = (
             discord.Embed(
                 description=f"<@{user.id}> wants to chat! 🤖💬",
@@ -107,20 +108,19 @@ async def chat_command(  # noqa: N802 (discord uses "int" param name)
             .add_field(name="max_tokens", value=max_tokens, inline=True)
             .add_field(name=user.name, value=message)
         )
+        await int.response.send_message(embed=embed)
+        response_msg = await int.original_response()
 
-        # 2️⃣  Send follow‑up message (becomes thread starter)
-        response_msg = await int.followup.send(embed=embed)
-
-        # Create the thread
+        # Create dedicated thread
         thread = await response_msg.create_thread(
             name=f"{ACTIVATE_THREAD_PREFX} {user.name[:20]} - {message[:30]}",
-            reason="SkippyAI chat",
             slowmode_delay=0,
             auto_archive_duration=60,
+            reason="SkippyAI chat",
         )
         thread_data[thread.id] = ThreadConfig(model, max_tokens, temperature)
 
-        # Generate first reply
+        # First reply
         async with thread.typing():
             data = await generate_completion_response(
                 [Message(user=user.name, text=message)],
@@ -128,13 +128,13 @@ async def chat_command(  # noqa: N802 (discord uses "int" param name)
             )
             await process_response(thread, data)
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception(exc)
         if not int.response.is_done():
             await int.response.send_message(f"Error: {exc}", ephemeral=True)
 
 # ───────────────────────────────────────────────────────────────
-# Handle every message inside a thread the bot owns
+# Handle messages in bot‑owned threads
 # ───────────────────────────────────────────────────────────────
 @client.event
 async def on_message(msg: DiscordMessage):
@@ -156,13 +156,13 @@ async def on_message(msg: DiscordMessage):
             await close_thread(thread)
             return
 
-        # Ensure config exists for threads across restarts
+        # Re‑attach default config if bot restarted
         if thread.id not in thread_data:
             thread_data[thread.id] = ThreadConfig(
                 model=DEFAULT_MODEL, max_tokens=512, temperature=1.0
             )
 
-        # Optional batching
+        # Optional batching delay
         if SECONDS_DELAY_RECEIVING_MSG:
             await asyncio.sleep(SECONDS_DELAY_RECEIVING_MSG)
             if is_last_message_stale(msg, thread.last_message, client.user.id):
@@ -172,12 +172,11 @@ async def on_message(msg: DiscordMessage):
             f"Thread msg – {msg.author}: {msg.content[:60]} ({thread.jump_url})"
         )
 
-        # Build conversation context
         history = [
-            m
+            discord_message_to_message(m)
             async for m in thread.history(limit=MAX_THREAD_MESSAGES)
         ]
-        history = [discord_message_to_message(m) for m in history if m]
+        history = [m for m in history if m]
         history.reverse()
 
         async with thread.typing():
@@ -188,7 +187,7 @@ async def on_message(msg: DiscordMessage):
             return
         await process_response(thread, data)
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception(exc)
 
 # ───────────────────────────────────────────────────────────────
