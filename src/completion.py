@@ -125,14 +125,30 @@ async def maybe_continue(thread: discord.Thread):
         await thread.send(next_chunk)
 
 async def generate_title(prompt: str) -> str:
+    """
+    Create a Skippy‑style Discord thread title (<=40 chars).
+    """
+    # Use only the persona's first paragraph for flavour
+    persona = BOT_INSTRUCTIONS.split("\n\n", 1)[0]
+
+    system_msg = (
+        f"{persona}\n\n"
+        "Generate a *concise* (<=40 characters) Discord thread title that:\n"
+        "• playfully belittles the human OR boasts about yourself, and\n"
+        "• clearly hints at the technical topic in their prompt.\n"
+        "No hashtags, no quotes, no trailing punctuation."
+    )
+
     resp = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Return a short Discord thread title."},
+            {"role": "system", "content": system_msg},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=12,
-        temperature=0.6,
+        max_tokens=16,      # ~48 characters max
+        temperature=0.7,
+        top_p=0.9,
     )
-    return resp.choices[0].message.content.strip().replace("\n", " ")[:40]
+    title = resp.choices[0].message.content.strip().replace("\n", " ")
+    return title[:40]  # hard cap
 

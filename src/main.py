@@ -27,7 +27,7 @@ from src.utils import (
     is_last_message_stale,
     discord_message_to_message,
 )
-from src.completion import generate_completion_response, process_response
+from src.completion import generate_completion_response, process_response, generate_title
 
 logging.basicConfig(
     format="[%(asctime)s] [%(filename)s:%(lineno)d] %(message)s",
@@ -79,11 +79,12 @@ async def on_ready():
 async def chat_command(  # noqa: N802
     int: discord.Interaction,
     message: str,
-    model: AVAILABLE_MODELS = "gpt-4o-mini",  # literal default
+    model: AVAILABLE_MODELS = "gpt-4o-mini",   # literal default
     temperature: Optional[float] = 1.0,
     max_tokens: Optional[int] = 512,
 ):
     try:
+        # Preconditions -------------------------------------------------------
         if not isinstance(int.channel, discord.TextChannel):
             return
         if should_block(int.guild):
@@ -97,7 +98,7 @@ async def chat_command(  # noqa: N802
         user = int.user
         logger.info(f"/chat by {user} – {message[:60]}")
 
-        # Send an embed immediately (within 3 s)
+        # Send an immediate embed (Discord 3s rule)
         embed = (
             discord.Embed(
                 description=f"<@{user.id}> wants to chat! 🤖💬",
@@ -110,10 +111,11 @@ async def chat_command(  # noqa: N802
         )
         await int.response.send_message(embed=embed)
         response_msg = await int.original_response()
-        
-        title = await generate_title(message)
-        
-        # Create dedicated thread
+
+        # Generate a catchy thread title with GPT‑mini
+        title = await generate_title(message)  
+
+        # Create the thread
         thread = await response_msg.create_thread(
             name=f"{ACTIVATE_THREAD_PREFX} {title}",
             slowmode_delay=0,
@@ -122,7 +124,7 @@ async def chat_command(  # noqa: N802
         )
         thread_data[thread.id] = ThreadConfig(model, max_tokens, temperature)
 
-        # First reply
+        # First reply from Skippy
         async with thread.typing():
             data = await generate_completion_response(
                 [Message(user=user.name, text=message)],
@@ -130,7 +132,7 @@ async def chat_command(  # noqa: N802
             )
             await process_response(thread, data)
 
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.exception(exc)
         if not int.response.is_done():
             await int.response.send_message(f"Error: {exc}", ephemeral=True)
