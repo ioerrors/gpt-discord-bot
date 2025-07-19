@@ -1,9 +1,14 @@
+# ───────────────────────────────────────────────────────────────
+#  src/main.py   —  SkippyAI (no‑moderation edition)
+# ───────────────────────────────────────────────────────────────
 from collections import defaultdict
-from typing import Literal, Optional, Union
+from typing import Optional, Literal
 
+import asyncio
+import logging
 import discord
 from discord import Message as DiscordMessage, app_commands
-import logging
+
 from src.base import Message, Conversation, ThreadConfig
 from src.constants import (
     BOT_INVITE_URL,
@@ -15,7 +20,6 @@ from src.constants import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
 )
-import asyncio
 from src.utils import (
     logger,
     should_block,
@@ -23,18 +27,14 @@ from src.utils import (
     is_last_message_stale,
     discord_message_to_message,
 )
-from src import completion
 from src.completion import generate_completion_response, process_response
-from src.moderation import (
-    moderate_message,
-    send_moderation_blocked_message,
-    send_moderation_flagged_message,
-)
 
 logging.basicConfig(
-    format="[%(asctime)s] [%(filename)s:%(lineno)d] %(message)s", level=logging.INFO
+    format="[%(asctime)s] [%(filename)s:%(lineno)d] %(message)s",
+    level=logging.INFO,
 )
 
+# ───────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -46,35 +46,38 @@ thread_data = defaultdict()
 @client.event
 async def on_ready():
     logger.info(f"We have logged in as {client.user}. Invite URL: {BOT_INVITE_URL}")
+    # propagate bot name to completion module
+    from src import completion
+
     completion.MY_BOT_NAME = client.user.name
     completion.MY_BOT_EXAMPLE_CONVOS = []
     for c in EXAMPLE_CONVOS:
-        messages = []
+        msgs = []
         for m in c.messages:
-            if m.user == "Lenard":
-                messages.append(Message(user=client.user.name, text=m.text))
-            else:
-                messages.append(m)
-        completion.MY_BOT_EXAMPLE_CONVOS.append(Conversation(messages=messages))
+            user = client.user.name if m.user == "Lenard" else m.user
+            msgs.append(Message(user=user, text=m.text))
+        completion.MY_BOT_EXAMPLE_CONVOS.append(Conversation(messages=msgs))
+
     await tree.sync()
 
 
-# /chat message:
+# ───────────────────────────────────────────────────────────────
+# /chat  slash‑command
+# ───────────────────────────────────────────────────────────────
 @tree.command(name="chat", description="Create a new thread for conversation")
-@discord.app_commands.checks.has_permissions(send_messages=True)
-@discord.app_commands.checks.has_permissions(view_channel=True)
-@discord.app_commands.checks.bot_has_permissions(send_messages=True)
-@discord.app_commands.checks.bot_has_permissions(view_channel=True)
-@discord.app_commands.checks.bot_has_permissions(manage_threads=True)
+@discord.app_commands.checks.has_permissions(send_messages=True, view_channel=True)
+@discord.app_commands.checks.bot_has_permissions(
+    send_messages=True, view_channel=True, manage_threads=True
+)
 @app_commands.describe(message="The first prompt to start the chat with")
 @app_commands.describe(model="The model to use for the chat")
 @app_commands.describe(
-    temperature="Controls randomness. Higher values mean more randomness. Between 0 and 1"
+    temperature="Controls randomness (0‑1). Higher = more creative."
 )
 @app_commands.describe(
-    max_tokens="How many tokens the model should output at max for each message."
+    max_tokens="Max tokens the model may generate per reply (1‑4096)."
 )
-async def chat_command(
+async def chat_command(  # noqa: N802  (discord uses "int" param name)
     int: discord.Interaction,
     message: str,
     model: AVAILABLE_MODELS = DEFAULT_MODEL,
@@ -82,231 +85,115 @@ async def chat_command(
     max_tokens: Optional[int] = 512,
 ):
     try:
-        # only support creating thread in text channel
+        # Only allow invocations from text channels
         if not isinstance(int.channel, discord.TextChannel):
             return
 
-        # block servers not in allow list
+        # Block guilds not in allow‑list
         if should_block(guild=int.guild):
             return
 
+        # Validate numeric params
+        if not 0 <= temperature <= 1:
+            await int.response.send_message(
+                f"Invalid temperature {temperature} (0‑1 required)", ephemeral=True
+            )
+            return
+        if not 1 <= max_tokens <= 4096:
+            await int.response.send_message(
+                f"Invalid max_tokens {max_tokens} (1‑4096 required)", ephemeral=True
+            )
+            return
+
         user = int.user
-        logger.info(f"Chat command by {user} {message[:20]}")
+        logger.info(f"/chat by {user} – {message[:50]}")
 
-        # Check for valid temperature
-        if temperature is not None and (temperature < 0 or temperature > 1):
-            await int.response.send_message(
-                f"You supplied an invalid temperature: {temperature}. Temperature must be between 0 and 1.",
-                ephemeral=True,
-            )
-            return
+        # Build & send an embed summarizing the request
+        embed = discord.Embed(
+            description=f"<@{user.id}> wants to chat! 🤖💬",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="model", value=model)
+        embed.add_field(name="temperature", value=temperature, inline=True)
+        embed.add_field(name="max_tokens", value=max_tokens, inline=True)
+        embed.add_field(name=user.name, value=message)
 
-        # Check for valid max_tokens
-        if max_tokens is not None and (max_tokens < 1 or max_tokens > 4096):
-            await int.response.send_message(
-                f"You supplied an invalid max_tokens: {max_tokens}. Max tokens must be between 1 and 4096.",
-                ephemeral=True,
-            )
-            return
+        await int.response.send_message(embed=embed)
+        response_msg = await int.original_response()
 
-        try:
-            # moderate the message
-            flagged_str, blocked_str = moderate_message(message=message, user=user)
-            await send_moderation_blocked_message(
-                guild=int.guild,
-                user=user,
-                blocked_str=blocked_str,
-                message=message,
-            )
-            if len(blocked_str) > 0:
-                # message was blocked
-                await int.response.send_message(
-                    f"Your prompt has been blocked by moderation.\n{message}",
-                    ephemeral=True,
-                )
-                return
-
-            embed = discord.Embed(
-                description=f"<@{user.id}> wants to chat! 🤖💬",
-                color=discord.Color.green(),
-            )
-            embed.add_field(name="model", value=model)
-            embed.add_field(name="temperature", value=temperature, inline=True)
-            embed.add_field(name="max_tokens", value=max_tokens, inline=True)
-            embed.add_field(name=user.name, value=message)
-
-            if len(flagged_str) > 0:
-                # message was flagged
-                embed.color = discord.Color.yellow()
-                embed.title = "⚠️ This prompt was flagged by moderation."
-
-            await int.response.send_message(embed=embed)
-            response = await int.original_response()
-
-            await send_moderation_flagged_message(
-                guild=int.guild,
-                user=user,
-                flagged_str=flagged_str,
-                message=message,
-                url=response.jump_url,
-            )
-        except Exception as e:
-            logger.exception(e)
-            await int.response.send_message(
-                f"Failed to start chat {str(e)}", ephemeral=True
-            )
-            return
-
-        # create the thread
-        thread = await response.create_thread(
+        # Create a thread for the conversation
+        thread = await response_msg.create_thread(
             name=f"{ACTIVATE_THREAD_PREFX} {user.name[:20]} - {message[:30]}",
-            slowmode_delay=1,
-            reason="gpt-bot",
+            reason="SkippyAI chat",
+            slowmode_delay=0,
             auto_archive_duration=60,
         )
-        thread_data[thread.id] = ThreadConfig(
-            model=model, max_tokens=max_tokens, temperature=temperature
-        )
+        thread_data[thread.id] = ThreadConfig(model, max_tokens, temperature)
+
+        # Generate first reply
         async with thread.typing():
-            # fetch completion
             messages = [Message(user=user.name, text=message)]
-            response_data = await generate_completion_response(
-                messages=messages, user=user, thread_config=thread_data[thread.id]
-            )
-            # send the result
-            await process_response(
-                user=user, thread=thread, response_data=response_data
-            )
-    except Exception as e:
-        logger.exception(e)
-        await int.response.send_message(
-            f"Failed to start chat {str(e)}", ephemeral=True
-        )
+            data = await generate_completion_response(messages, thread_data[thread.id])
+            await process_response(thread, data)
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(exc)
+        await int.response.send_message(f"Error starting chat: {exc}", ephemeral=True)
 
 
-# calls for each message
+# ───────────────────────────────────────────────────────────────
+# Handle every message inside a thread the bot owns
+# ───────────────────────────────────────────────────────────────
 @client.event
-async def on_message(message: DiscordMessage):
+async def on_message(msg: DiscordMessage):
     try:
-        # block servers not in allow list
-        if should_block(guild=message.guild):
+        if msg.author == client.user:
+            return
+        if not isinstance(msg.channel, discord.Thread):
             return
 
-        # ignore messages from the bot
-        if message.author == client.user:
-            return
-
-        # ignore messages not in a thread
-        channel = message.channel
-        if not isinstance(channel, discord.Thread):
-            return
-
-        # ignore threads not created by the bot
-        thread = channel
+        thread = msg.channel
         if thread.owner_id != client.user.id:
             return
-
-        # ignore threads that are archived locked or title is not what we want
-        if (
-            thread.archived
-            or thread.locked
-            or not thread.name.startswith(ACTIVATE_THREAD_PREFX)
+        if thread.archived or thread.locked or not thread.name.startswith(
+            ACTIVATE_THREAD_PREFX
         ):
-            # ignore this thread
             return
-
         if thread.message_count > MAX_THREAD_MESSAGES:
-            # too many messages, no longer going to reply
-            await close_thread(thread=thread)
+            await close_thread(thread)
+            return
+        if should_block(guild=msg.guild):
             return
 
-        # moderate the message
-        flagged_str, blocked_str = moderate_message(
-            message=message.content, user=message.author
-        )
-        await send_moderation_blocked_message(
-            guild=message.guild,
-            user=message.author,
-            blocked_str=blocked_str,
-            message=message.content,
-        )
-        if len(blocked_str) > 0:
-            try:
-                await message.delete()
-                await thread.send(
-                    embed=discord.Embed(
-                        description=f"❌ **{message.author}'s message has been deleted by moderation.**",
-                        color=discord.Color.red(),
-                    )
-                )
-                return
-            except Exception as e:
-                await thread.send(
-                    embed=discord.Embed(
-                        description=f"❌ **{message.author}'s message has been blocked by moderation but could not be deleted. Missing Manage Messages permission in this Channel.**",
-                        color=discord.Color.red(),
-                    )
-                )
-                return
-        await send_moderation_flagged_message(
-            guild=message.guild,
-            user=message.author,
-            flagged_str=flagged_str,
-            message=message.content,
-            url=message.jump_url,
-        )
-        if len(flagged_str) > 0:
-            await thread.send(
-                embed=discord.Embed(
-                    description=f"⚠️ **{message.author}'s message has been flagged by moderation.**",
-                    color=discord.Color.yellow(),
-                )
-            )
-
-        # wait a bit in case user has more messages
-        if SECONDS_DELAY_RECEIVING_MSG > 0:
+        # Optional batching delay
+        if SECONDS_DELAY_RECEIVING_MSG:
             await asyncio.sleep(SECONDS_DELAY_RECEIVING_MSG)
-            if is_last_message_stale(
-                interaction_message=message,
-                last_message=thread.last_message,
-                bot_id=client.user.id,
-            ):
-                # there is another message, so ignore this one
+            if is_last_message_stale(msg, thread.last_message, client.user.id):
                 return
 
         logger.info(
-            f"Thread message to process - {message.author}: {message.content[:50]} - {thread.name} {thread.jump_url}"
+            f"Processing thread msg – {msg.author}: {msg.content[:60]} ({thread.jump_url})"
         )
 
-        channel_messages = [
-            discord_message_to_message(message)
-            async for message in thread.history(limit=MAX_THREAD_MESSAGES)
+        # Reconstruct conversation context
+        history = [
+            discord_message_to_message(m)
+            async for m in thread.history(limit=MAX_THREAD_MESSAGES)
         ]
-        channel_messages = [x for x in channel_messages if x is not None]
-        channel_messages.reverse()
+        history = [h for h in history if h]
+        history.reverse()
 
-        # generate the response
         async with thread.typing():
-            response_data = await generate_completion_response(
-                messages=channel_messages,
-                user=message.author,
-                thread_config=thread_data[thread.id],
-            )
+            data = await generate_completion_response(history, thread_data[thread.id])
 
-        if is_last_message_stale(
-            interaction_message=message,
-            last_message=thread.last_message,
-            bot_id=client.user.id,
-        ):
-            # there is another message and its not from us, so ignore this response
+        if is_last_message_stale(msg, thread.last_message, client.user.id):
             return
 
-        # send response
-        await process_response(
-            user=message.author, thread=thread, response_data=response_data
-        )
-    except Exception as e:
-        logger.exception(e)
+        await process_response(thread, data)
+
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(exc)
 
 
+# ───────────────────────────────────────────────────────────────
 client.run(DISCORD_BOT_TOKEN)
