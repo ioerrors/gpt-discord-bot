@@ -1,34 +1,25 @@
+# completion.py  –  SkippyAI edition: no moderation, 1900‑char chunks, /continue
 from enum import Enum
 from dataclasses import dataclass
+from typing import Optional, List, Dict
+
 import openai
 from openai import AsyncOpenAI
-
-from src.moderation import moderate_message
-from typing import Optional, List
-from src.constants import (
-    BOT_INSTRUCTIONS,
-    BOT_NAME,
-    EXAMPLE_CONVOS,
-)
 import discord
+
+from src.constants import BOT_INSTRUCTIONS, BOT_NAME, EXAMPLE_CONVOS, MAX_CHARS_PER_REPLY_MSG
 from src.base import Message, Prompt, Conversation, ThreadConfig
 from src.utils import split_into_shorter_messages, close_thread, logger
-from src.moderation import (
-    send_moderation_flagged_message,
-    send_moderation_blocked_message,
-)
 
 MY_BOT_NAME = BOT_NAME
 MY_BOT_EXAMPLE_CONVOS = EXAMPLE_CONVOS
 
-
+# ───────────────────────────────────────────────────────────────
 class CompletionResult(Enum):
     OK = 0
     TOO_LONG = 1
     INVALID_REQUEST = 2
     OTHER_ERROR = 3
-    MODERATION_FLAGGED = 4
-    MODERATION_BLOCKED = 5
 
 
 @dataclass
@@ -40,19 +31,24 @@ class CompletionData:
 
 client = AsyncOpenAI()
 
+# ───────────────────────────────────────────────────────────────
+# Internal store for "continue" payloads keyed by (guild_id, thread_id)
+PENDING_REPLIES: Dict[tuple[int, int], List[str]] = {}
+CONTINUE_HINT = "\n\n*(type `continue` for more)*"
 
+# ───────────────────────────────────────────────────────────────
 async def generate_completion_response(
-    messages: List[Message], user: str, thread_config: ThreadConfig
+    messages: List[Message],
+    thread_config: ThreadConfig,
 ) -> CompletionData:
+    prompt = Prompt(
+        header=Message("system", f"Instructions for {MY_BOT_NAME}: {BOT_INSTRUCTIONS}"),
+        examples=MY_BOT_EXAMPLE_CONVOS,
+        convo=Conversation(messages),
+    )
+    rendered = prompt.full_render(MY_BOT_NAME)
+
     try:
-        prompt = Prompt(
-            header=Message(
-                "system", f"Instructions for {MY_BOT_NAME}: {BOT_INSTRUCTIONS}"
-            ),
-            examples=MY_BOT_EXAMPLE_CONVOS,
-            convo=Conversation(messages),
-        )
-        rendered = prompt.full_render(MY_BOT_NAME)
         response = await client.chat.completions.create(
             model=thread_config.model,
             messages=rendered,
@@ -62,107 +58,68 @@ async def generate_completion_response(
             stop=["<|endoftext|>"],
         )
         reply = response.choices[0].message.content.strip()
-        if reply:
-            flagged_str, blocked_str = moderate_message(
-                message=(rendered[-1]["content"] + reply)[-500:], user=user
-            )
-            if len(blocked_str) > 0:
-                return CompletionData(
-                    status=CompletionResult.MODERATION_BLOCKED,
-                    reply_text=reply,
-                    status_text=f"from_response:{blocked_str}",
-                )
+        return CompletionData(CompletionResult.OK, reply, None)
 
-            if len(flagged_str) > 0:
-                return CompletionData(
-                    status=CompletionResult.MODERATION_FLAGGED,
-                    reply_text=reply,
-                    status_text=f"from_response:{flagged_str}",
-                )
-
-        return CompletionData(
-            status=CompletionResult.OK, reply_text=reply, status_text=None
-        )
     except openai.BadRequestError as e:
-        if "This model's maximum context length" in str(e):
-            return CompletionData(
-                status=CompletionResult.TOO_LONG, reply_text=None, status_text=str(e)
-            )
-        else:
-            logger.exception(e)
-            return CompletionData(
-                status=CompletionResult.INVALID_REQUEST,
-                reply_text=None,
-                status_text=str(e),
-            )
+        if "maximum context length" in str(e):
+            return CompletionData(CompletionResult.TOO_LONG, None, str(e))
+        return CompletionData(CompletionResult.INVALID_REQUEST, None, str(e))
+
     except Exception as e:
         logger.exception(e)
-        return CompletionData(
-            status=CompletionResult.OTHER_ERROR, reply_text=None, status_text=str(e)
-        )
+        return CompletionData(CompletionResult.OTHER_ERROR, None, str(e))
 
-
+# ───────────────────────────────────────────────────────────────
 async def process_response(
-    user: str, thread: discord.Thread, response_data: CompletionData
+    thread: discord.Thread,
+    response_data: CompletionData,
 ):
-    status = response_data.status
-    reply_text = response_data.reply_text
-    status_text = response_data.status_text
-    if status is CompletionResult.OK or status is CompletionResult.MODERATION_FLAGGED:
-        sent_message = None
-        if not reply_text:
-            sent_message = await thread.send(
-                embed=discord.Embed(
-                    description=f"**Invalid response** - empty response",
-                    color=discord.Color.yellow(),
-                )
-            )
-        else:
-            shorter_response = split_into_shorter_messages(reply_text)
-            for r in shorter_response:
-                sent_message = await thread.send(r)
-        if status is CompletionResult.MODERATION_FLAGGED:
-            await send_moderation_flagged_message(
-                guild=thread.guild,
-                user=user,
-                flagged_str=status_text,
-                message=reply_text,
-                url=sent_message.jump_url if sent_message else "no url",
-            )
+    status, reply_text, status_text = (
+        response_data.status,
+        response_data.reply_text,
+        response_data.status_text,
+    )
 
+    if status is CompletionResult.OK:
+        if not reply_text:
             await thread.send(
                 embed=discord.Embed(
-                    description=f"⚠️ **This conversation has been flagged by moderation.**",
+                    description="**Invalid response** – empty text",
                     color=discord.Color.yellow(),
                 )
             )
-    elif status is CompletionResult.MODERATION_BLOCKED:
-        await send_moderation_blocked_message(
-            guild=thread.guild,
-            user=user,
-            blocked_str=status_text,
-            message=reply_text,
-        )
+            return
 
+        chunks = split_into_shorter_messages(reply_text, MAX_CHARS_PER_REPLY_MSG)
+        if len(chunks) > 1:
+            # Keep the extra chunks aside and hint user
+            key = (thread.guild.id, thread.id)
+            PENDING_REPLIES[key] = chunks[1:]
+            chunks[-1] += CONTINUE_HINT
+
+        for chunk in chunks[:1]:  # send only the first chunk now
+            await thread.send(chunk)
+
+    elif status is CompletionResult.TOO_LONG:
+        await close_thread(thread)
+
+    else:  # INVALID_REQUEST or OTHER_ERROR
         await thread.send(
             embed=discord.Embed(
-                description=f"❌ **The response has been blocked by moderation.**",
+                description=f"**Error** – {status_text}",
                 color=discord.Color.red(),
             )
         )
-    elif status is CompletionResult.TOO_LONG:
-        await close_thread(thread)
-    elif status is CompletionResult.INVALID_REQUEST:
-        await thread.send(
-            embed=discord.Embed(
-                description=f"**Invalid request** - {status_text}",
-                color=discord.Color.yellow(),
-            )
-        )
-    else:
-        await thread.send(
-            embed=discord.Embed(
-                description=f"**Error** - {status_text}",
-                color=discord.Color.yellow(),
-            )
-        )
+
+# ───────────────────────────────────────────────────────────────
+async def maybe_continue(thread: discord.Thread):
+    """If the user types 'continue', send the next pending chunk."""
+    key = (thread.guild.id, thread.id)
+    if key in PENDING_REPLIES and PENDING_REPLIES[key]:
+        next_chunk = PENDING_REPLIES[key].pop(0)
+        if PENDING_REPLIES[key]:
+            next_chunk += CONTINUE_HINT
+        else:
+            # All chunks consumed
+            del PENDING_REPLIES[key]
+        await thread.send(next_chunk)
