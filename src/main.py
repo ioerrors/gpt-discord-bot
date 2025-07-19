@@ -110,10 +110,12 @@ async def chat_command(  # noqa: N802
         )
         await int.response.send_message(embed=embed)
         response_msg = await int.original_response()
-
+        
+        title = await generate_title(message)
+        
         # Create dedicated thread
         thread = await response_msg.create_thread(
-            name=f"{ACTIVATE_THREAD_PREFX} {user.name[:20]} - {message[:30]}",
+            name=f"{ACTIVATE_THREAD_PREFX} {title}",
             slowmode_delay=0,
             auto_archive_duration=60,
             reason="SkippyAI chat",

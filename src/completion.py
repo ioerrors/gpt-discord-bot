@@ -123,3 +123,16 @@ async def maybe_continue(thread: discord.Thread):
             # All chunks consumed
             del PENDING_REPLIES[key]
         await thread.send(next_chunk)
+
+async def generate_title(prompt: str) -> str:
+    resp = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Return a short Discord thread title."},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=12,
+        temperature=0.6,
+    )
+    return resp.choices[0].message.content.strip().replace("\n", " ")[:40]
+
