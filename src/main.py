@@ -48,7 +48,7 @@ thread_data: dict[int, ThreadConfig] = defaultdict()
 # ───────────────────────────────────────────────────────────────
 async def _reconstruct_thread_config(thread: discord.Thread) -> ThreadConfig:
     model = DEFAULT_MODEL
-    max_tokens = 1024 if model.startswith("gpt-5") else 512
+    max_tokens = _default_max_for(DEFAULT_MODEL)
     temperature = 1.0
 
     async for m in thread.history(limit=1, oldest_first=True):
@@ -78,7 +78,7 @@ async def _reconstruct_thread_config(thread: discord.Thread) -> ThreadConfig:
     return ThreadConfig(model=model, max_tokens=max_tokens, temperature=temperature)
 
 def _default_max_for(model: str) -> int:
-    return 1024 if model.startswith("gpt-5") else 512
+    return 2048 if model.startswith("gpt-5") else 512
 # ───────────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
@@ -137,7 +137,7 @@ async def chat_command(
 
         # Choose default only if user didn’t set one
         effective_max = max_tokens if max_tokens is not None else (
-            1024 if model.startswith("gpt-5") else 512
+            _default_max_for(model) if model else _default_max_for(DEFAULT_MODEL)
         )
 
         user = int.user
@@ -145,6 +145,7 @@ async def chat_command(
         
         display_msg = message if len(message) <= 1000 else message[:1000] + "…"
 
+        
         # Send an immediate embed (Discord 3s rule)
         embed = (
             discord.Embed(
