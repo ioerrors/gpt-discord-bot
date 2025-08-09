@@ -49,7 +49,7 @@ thread_data: dict[int, ThreadConfig] = defaultdict()
 async def _reconstruct_thread_config(thread: discord.Thread) -> ThreadConfig:
     model = DEFAULT_MODEL
     max_tokens = _default_max_for(DEFAULT_MODEL)
-    temperature = 1.0
+    temperature = _default_temp_for(DEFAULT_MODEL)
 
     async for m in thread.history(limit=1, oldest_first=True):
         if (
@@ -77,8 +77,13 @@ async def _reconstruct_thread_config(thread: discord.Thread) -> ThreadConfig:
 
     return ThreadConfig(model=model, max_tokens=max_tokens, temperature=temperature)
 
+# ───────────────────────────────────────────────────────────────
+# Default max tokens for a model
 def _default_max_for(model: str) -> int:
     return 2048 if model.startswith("gpt-5") else 512
+# default temp for gpt-5 is 0.2, for others is 1.0
+def _default_temp_for(model: str) -> float:
+    return 0.5 if model.startswith("gpt-5") else 1.0
 # ───────────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
@@ -118,7 +123,7 @@ async def chat_command(
     int: discord.Interaction,
     message: str,
     model: AVAILABLE_MODELS = "gpt-5",
-    temperature: Optional[float] = 1.0,
+    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
 ):
     try:
@@ -128,7 +133,7 @@ async def chat_command(
         if should_block(int.guild):
             return
         # Validation
-        if temperature is None or not 0 <= temperature <= 1:
+        if temperature is not None and not 0 <= temperature <= 1:
             await int.response.send_message("Invalid temperature.", ephemeral=True)
             return
         if max_tokens is not None and not 1 <= max_tokens <= 4096:
@@ -139,6 +144,8 @@ async def chat_command(
         effective_max = max_tokens if max_tokens is not None else (
             _default_max_for(model) if model else _default_max_for(DEFAULT_MODEL)
         )
+        # Calm default for GPT-5 unless user overrides
+        effective_temp = _default_temp_for(model) if model else _default_temp_for(DEFAULT_MODEL)
 
         user = int.user
         logger.info(f"/chat by {user} – {message[:60]}")
@@ -158,8 +165,8 @@ async def chat_command(
             .add_field(name="max_tokens", value=effective_max, inline=True)
         )
         # Optional: only show temperature if user overrode it
-        if temperature != 1.0:
-            embed.add_field(name="temperature", value=temperature, inline=True)
+        if temperature is not None:
+            embed.add_field(name="temperature", value=effective_temp, inline=True)
 
         await int.response.send_message(embed=embed)
         response_msg = await int.original_response()
@@ -174,7 +181,7 @@ async def chat_command(
             auto_archive_duration=60,
             reason="SkippyAI chat",
         )
-        thread_data[thread.id] = ThreadConfig(model, effective_max, temperature)
+        thread_data[thread.id] = ThreadConfig(model, effective_max, effective_temp)
 
         # First reply from Skippy
         async with thread.typing():
