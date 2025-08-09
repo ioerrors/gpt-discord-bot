@@ -87,21 +87,35 @@ async def generate_completion_response(
         return CompletionData(CompletionResult.INVALID_REQUEST, None, str(e))
 
     except Exception as e:
-        # Fallback to legacy Chat Completions
+        # Fallback to Chat Completions (support both param names)
         try:
-            response = await client.chat.completions.create(
-                model=thread_config.model,
-                messages=rendered,
-                temperature=thread_config.temperature,
-                top_p=1.0,
-                max_tokens=thread_config.max_tokens,
-                stop=["<|endoftext|>"],
-            )
+            try:
+                response = await client.chat.completions.create(
+                    model=thread_config.model,
+                    messages=rendered,
+                    temperature=thread_config.temperature,
+                    top_p=1.0,
+                    max_completion_tokens=thread_config.max_tokens,
+                    stop=["<|endoftext|>"],
+                )
+            except openai.BadRequestError as ee:
+                if "max_completion_tokens" in str(ee) or "Unsupported parameter" in str(ee):
+                    response = await client.chat.completions.create(
+                        model=thread_config.model,
+                        messages=rendered,
+                        temperature=thread_config.temperature,
+                        top_p=1.0,
+                        max_tokens=thread_config.max_tokens,
+                        stop=["<|endoftext|>"],
+                    )
+                else:
+                    raise
             reply = response.choices[0].message.content.strip()
             return CompletionData(CompletionResult.OK, reply, None)
         except Exception as e2:
             logger.exception(e2)
             return CompletionData(CompletionResult.OTHER_ERROR, None, f"{e} / fallback: {e2}")
+
 
 # ───────────────────────────────────────────────────────────────
 async def process_response(
@@ -185,16 +199,31 @@ async def generate_title(prompt: str) -> str:
         )
         title = (await _responses_text(resp)).strip().replace("\n", " ")
     except Exception:
-        resp = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=16,
-            temperature=0.7,
-            top_p=0.9,
-        )
+        try:
+            resp = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt},
+                ],
+                max_completion_tokens=16,
+                temperature=0.7,
+                top_p=0.9,
+            )
+        except openai.BadRequestError as ee:
+            if "max_completion_tokens" in str(ee) or "Unsupported parameter" in str(ee):
+                resp = await client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=16,
+                    temperature=0.7,
+                    top_p=0.9,
+                )
+            else:
+                raise
         title = resp.choices[0].message.content.strip().replace("\n", " ")
     return title[:40]  # hard cap
 
