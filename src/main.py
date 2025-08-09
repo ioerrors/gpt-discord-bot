@@ -1,13 +1,11 @@
 # ───────────────────────────────────────────────────────────────
-#  src/main.py  —  SkippyAI (restart‑safe, no‑moderation)
+#  src/main.py  —  SkippyAI
 # ───────────────────────────────────────────────────────────────
 # top of src/main.py
-import openai, logging
-logging.info(f"openai SDK: {openai.__version__}")
-
 from collections import defaultdict
 from typing import Optional
 
+import openai
 import asyncio
 import logging
 import discord
@@ -50,7 +48,8 @@ thread_data: dict[int, ThreadConfig] = defaultdict()
 @client.event
 async def on_ready():
     logger.info(f"Logged in as {client.user}. Invite URL: {BOT_INVITE_URL}")
-
+    logging.info(f"openai SDK: {openai.__version__}")
+    
     # propagate bot name & examples to completion.py
     from src import completion
     completion.MY_BOT_NAME = client.user.name
