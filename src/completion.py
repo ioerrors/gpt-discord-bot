@@ -33,25 +33,34 @@ class CompletionData:
 client = AsyncOpenAI()
 
 async def _responses_text(resp) -> str:
-    """Extract text from Responses API object across SDK versions."""
+    """Extract plain text from Responses API objects across SDK versions."""
+    # 1) Newer SDKs expose .output_text
     try:
-        t = resp.output_text
+        t = getattr(resp, "output_text", None)
         if t:
             return t
     except Exception:
         pass
+
+    # 2) Older/mixed: resp.output[*].content[*] with type=output_text
     try:
         parts = getattr(resp, "output", None) or []
         out = []
         for p in parts:
-            for c in getattr(p, "content", []) or []:
-                if getattr(c, "type", "") == "output_text" and getattr(c, "text", None):
-                    out.append(c.text)
+            contents = getattr(p, "content", None) or []
+            for c in contents:
+                ctype = getattr(c, "type", None)
+                if ctype in ("output_text", "text"):
+                    txt = getattr(c, "text", None)
+                    if txt:
+                        out.append(txt)
         if out:
             return "".join(out)
     except Exception:
         pass
-    return str(resp)
+
+    # 3) No visible text — return empty so caller can decide (fallback/retry)
+    return ""
 
 # ───────────────────────────────────────────────────────────────
 # Internal store for "continue" payloads keyed by (guild_id, thread_id)
@@ -84,6 +93,9 @@ async def generate_completion_response(
             max_output_tokens=thread_config.max_tokens,
         )
         reply = (await _responses_text(response)).strip()
+        if not reply:
+            # Perhaps reasoning-only output; let the existing fallback handle it
+            raise RuntimeError("Responses produced no text")
         return CompletionData(CompletionResult.OK, reply, None)
 
     except openai.BadRequestError as e:

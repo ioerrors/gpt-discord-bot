@@ -15,17 +15,28 @@ from src.constants import MAX_CHARS_PER_REPLY_MSG, INACTIVATE_THREAD_PREFIX
 def discord_message_to_message(message: DiscordMessage) -> Optional[Message]:
     if (
         message.type == discord.MessageType.thread_starter_message
+        and message.reference
         and message.reference.cached_message
-        and len(message.reference.cached_message.embeds) > 0
-        and len(message.reference.cached_message.embeds[0].fields) > 0
+        and message.reference.cached_message.embeds
+        and message.reference.cached_message.embeds[0].fields
     ):
-        field = message.reference.cached_message.embeds[0].fields[0]
-        if field.value:
-            return Message(user=field.name, text=field.value)
+        fields = message.reference.cached_message.embeds[0].fields
+        META = {"model", "temperature", "max_tokens"}
+        # Prefer the field that looks like the user prompt
+        for f in fields:
+            if f.name and f.value and f.name.lower() not in META:
+                return Message(user=f.name, text=f.value)
+        # Fallback: first field if nothing matched
+        f0 = fields[0]
+        if f0.value:
+            return Message(user=f0.name, text=f0.value)
+
     else:
         if message.content:
             return Message(user=message.author.name, text=message.content)
+
     return None
+
 
 
 def split_into_shorter_messages(message: str) -> List[str]:

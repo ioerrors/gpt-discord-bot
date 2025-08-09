@@ -49,7 +49,7 @@ thread_data: dict[int, ThreadConfig] = defaultdict()
 async def on_ready():
     logger.info(f"Logged in as {client.user}. Invite URL: {BOT_INVITE_URL}")
     logging.info(f"openai SDK: {openai.__version__}")
-    
+
     # propagate bot name & examples to completion.py
     from src import completion
     completion.MY_BOT_NAME = client.user.name
@@ -79,12 +79,12 @@ async def on_ready():
     temperature="Randomness (0‑1). Higher = more creative.",
     max_tokens="Max tokens SkippyAI may generate in one reply (1‑4096).",
 )
-async def chat_command(  # noqa: N802
+async def chat_command(
     int: discord.Interaction,
     message: str,
-    model: AVAILABLE_MODELS = "gpt-5",   # literal default
+    model: AVAILABLE_MODELS = "gpt-5",
     temperature: Optional[float] = 1.0,
-    max_tokens: Optional[int] = 512,
+    max_tokens: Optional[int] = None,
 ):
     try:
         # Preconditions -------------------------------------------------------
@@ -92,11 +92,18 @@ async def chat_command(  # noqa: N802
             return
         if should_block(int.guild):
             return
-        if not 0 <= temperature <= 1 or not 1 <= max_tokens <= 4096:
-            await int.response.send_message(
-                "Invalid temperature or max_tokens.", ephemeral=True
-            )
+        # Validation
+        if temperature is None or not 0 <= temperature <= 1:
+            await int.response.send_message("Invalid temperature.", ephemeral=True)
             return
+        if max_tokens is not None and not 1 <= max_tokens <= 4096:
+            await int.response.send_message("Invalid max_tokens.", ephemeral=True)
+            return
+
+        # Choose default only if user didn’t set one
+        effective_max = max_tokens if max_tokens is not None else (
+            1024 if model.startswith("gpt-5") else 512
+        )
 
         user = int.user
         logger.info(f"/chat by {user} – {message[:60]}")
@@ -107,11 +114,15 @@ async def chat_command(  # noqa: N802
                 description=f"<@{user.id}> wants to chat! 🤖💬",
                 color=discord.Color.green(),
             )
-            .add_field(name="model", value=model)
-            .add_field(name="temperature", value=temperature, inline=True)
-            .add_field(name="max_tokens", value=max_tokens, inline=True)
-            .add_field(name=user.name, value=message)
+            # FIRST field must be the user's prompt for utils.discord_message_to_message()
+            .add_field(name=user.name, value=display_msg)
+            .add_field(name="model", value=model, inline=True)
+            .add_field(name="max_tokens", value=effective_max, inline=True)
         )
+        # Optional: only show temperature if user overrode it
+        if temperature != 1.0:
+            embed.add_field(name="temperature", value=temperature, inline=True)
+            
         await int.response.send_message(embed=embed)
         response_msg = await int.original_response()
 
