@@ -125,7 +125,7 @@ async def chat_command(
     int: discord.Interaction,
     message: str,
     model: AVAILABLE_MODELS = "gpt-5",
-    temperature: Optional[float] = None,
+    temperature: Optional[float] = 1.0,
     max_tokens: Optional[int] = None,
 ):
     try:
@@ -167,8 +167,8 @@ async def chat_command(
             .add_field(name="model", value=model, inline=True)
             .add_field(name="max_tokens", value=effective_max, inline=True)
         )
-        # Optional: only show temperature if user overrode it
-        if temperature is not None:
+        # Optional: only show temperature if user overrode it from 1.0
+        if temperature is not 1.0:
             embed.add_field(name="temperature", value=effective_temp, inline=True)
 
         await int.response.send_message(embed=embed)
