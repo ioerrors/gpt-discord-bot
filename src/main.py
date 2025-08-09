@@ -168,7 +168,7 @@ async def chat_command(
             .add_field(name="max_tokens", value=effective_max, inline=True)
         )
         # Optional: only show temperature if user overrode it from 1.0
-        if temperature is not 1.0:
+        if temperature != 1.0:
             embed.add_field(name="temperature", value=effective_temp, inline=True)
 
         await int.response.send_message(embed=embed)
