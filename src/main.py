@@ -81,9 +81,11 @@ async def _reconstruct_thread_config(thread: discord.Thread) -> ThreadConfig:
 # Default max tokens for a model
 def _default_max_for(model: str) -> int:
     return 2048 if model.startswith("gpt-5") else 512
-# default temp for gpt-5 is 0.2, for others is 1.0
+# default temp for gpt-5 is 1, for others is also 1.0, but we might want to change it later
+# the reason we use 1.0 for gpt-5 is that it seems to no longer support any temperature other than 1.0
+# https://community.openai.com/t/temperature-in-gpt-5-models/1337133/5
 def _default_temp_for(model: str) -> float:
-    return 0.5 if model.startswith("gpt-5") else 1.0
+    return 1.0 if model.startswith("gpt-5") else 1.0
 # ───────────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
@@ -144,6 +146,7 @@ async def chat_command(
         effective_max = max_tokens if max_tokens is not None else (
             _default_max_for(model) if model else _default_max_for(DEFAULT_MODEL)
         )
+        
         # Calm default for GPT-5 unless user overrides
         effective_temp = _default_temp_for(model) if model else _default_temp_for(DEFAULT_MODEL)
 
