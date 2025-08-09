@@ -1,6 +1,10 @@
 # ───────────────────────────────────────────────────────────────
 #  src/main.py  —  SkippyAI (restart‑safe, no‑moderation)
 # ───────────────────────────────────────────────────────────────
+# top of src/main.py
+import openai, logging
+logging.info(f"openai SDK: {openai.__version__}")
+
 from collections import defaultdict
 from typing import Optional
 
