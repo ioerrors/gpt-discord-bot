@@ -31,7 +31,35 @@ class CompletionData:
 
 
 client = AsyncOpenAI()
+# ───────────────────────────────────────────────────────────────
+#helper functions for Responses API
+# --- add this near the top of completion.py ---
+def _log_no_text_resp(resp, *, model: str, max_out: int, prompt_len: int) -> None:
+    """Always log why a Responses call produced no user-visible text."""
+    try:
+        rid = getattr(resp, "id", None)
+        status = getattr(resp, "status", None)
+        inc = getattr(resp, "incomplete_details", None)
+        inc_reason = getattr(inc, "reason", None) if inc else None
 
+        usage = getattr(resp, "usage", None)
+        it = getattr(usage, "input_tokens", None) if usage else None
+        ot = getattr(usage, "output_tokens", None) if usage else None
+        otd = getattr(usage, "output_tokens_details", None) if usage else None
+        rtok = getattr(otd, "reasoning_tokens", None) if otd else None
+
+        outs = getattr(resp, "output", None) or []
+        out_types = [getattr(o, "type", None) for o in outs]
+
+        logger.warning(
+            "Responses no-text: id=%s model=%s status=%s incomplete=%s "
+            "max_out=%s prompt_msgs=%s usage(in=%s out=%s reasoning=%s) out_types=%s",
+            rid, model, status, inc_reason, max_out, prompt_len, it, ot, rtok, out_types,
+        )
+    except Exception as e:
+        logger.exception(e)
+
+# ──────────────────────────────────────────────────────────────
 async def _responses_text(resp) -> str:
     """Extract plain text from Responses API objects across SDK versions."""
     # 1) Newer SDKs expose .output_text
@@ -94,6 +122,13 @@ async def generate_completion_response(
         )
         reply = (await _responses_text(response)).strip()
         if not reply:
+            _log_no_text_resp(
+                response,
+                model=thread_config.model,
+                max_out=thread_config.max_tokens,
+                prompt_len=len(rendered_for_responses),
+            )
+            logger.info("Falling back to Chat Completions because Responses returned no text.")
             # Perhaps reasoning-only output; let the existing fallback handle it
             raise RuntimeError("Responses produced no text")
         return CompletionData(CompletionResult.OK, reply, None)
