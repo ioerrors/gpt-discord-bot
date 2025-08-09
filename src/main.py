@@ -43,7 +43,42 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 thread_data: dict[int, ThreadConfig] = defaultdict()
+# ───────────────────────────────────────────────────────────────
+# Helpers
+# ───────────────────────────────────────────────────────────────
+async def _reconstruct_thread_config(thread: discord.Thread) -> ThreadConfig:
+    model = DEFAULT_MODEL
+    max_tokens = 1024 if model.startswith("gpt-5") else 512
+    temperature = 1.0
 
+    async for m in thread.history(limit=1, oldest_first=True):
+        if (
+            m.type == discord.MessageType.thread_starter_message
+            and m.reference and m.reference.cached_message
+            and m.reference.cached_message.embeds
+        ):
+            emb = m.reference.cached_message.embeds[0]
+            for f in emb.fields:
+                name = (f.name or "").lower()
+                val = (f.value or "").strip()
+                if name == "model" and val:
+                    model = val
+                elif name == "max_tokens" and val:
+                    try:
+                        max_tokens = int(val.split()[0])
+                    except:
+                        pass
+                elif name == "temperature" and val:
+                    try:
+                        temperature = float(val)
+                    except:
+                        pass
+            break
+
+    return ThreadConfig(model=model, max_tokens=max_tokens, temperature=temperature)
+
+def _default_max_for(model: str) -> int:
+    return 1024 if model.startswith("gpt-5") else 512
 # ───────────────────────────────────────────────────────────────
 @client.event
 async def on_ready():
@@ -107,6 +142,8 @@ async def chat_command(
 
         user = int.user
         logger.info(f"/chat by {user} – {message[:60]}")
+        
+        display_msg = message if len(message) <= 1000 else message[:1000] + "…"
 
         # Send an immediate embed (Discord 3s rule)
         embed = (
@@ -122,7 +159,7 @@ async def chat_command(
         # Optional: only show temperature if user overrode it
         if temperature != 1.0:
             embed.add_field(name="temperature", value=temperature, inline=True)
-            
+
         await int.response.send_message(embed=embed)
         response_msg = await int.original_response()
 
@@ -136,7 +173,7 @@ async def chat_command(
             auto_archive_duration=60,
             reason="SkippyAI chat",
         )
-        thread_data[thread.id] = ThreadConfig(model, max_tokens, temperature)
+        thread_data[thread.id] = ThreadConfig(model, effective_max, temperature)
 
         # First reply from Skippy
         async with thread.typing():
@@ -174,11 +211,16 @@ async def on_message(msg: DiscordMessage):
             await close_thread(thread)
             return
 
-        # Re‑attach default config if bot restarted
+        # Reconstruct thread config if missing (bot restarted), beta
         if thread.id not in thread_data:
-            thread_data[thread.id] = ThreadConfig(
-                model=DEFAULT_MODEL, max_tokens=512, temperature=1.0
-            )
+            thread_data[thread.id] = await _reconstruct_thread_config(thread)
+        # old Re‑attach default config if bot restarted
+        # if thread.id not in thread_data:
+        #     thread_data[thread.id] = ThreadConfig(
+        #         model=DEFAULT_MODEL, 
+        #         max_tokens=_default_max_for(DEFAULT_MODEL), 
+        #         temperature=1.0
+        #     )
 
         # Optional batching delay
         if SECONDS_DELAY_RECEIVING_MSG:
