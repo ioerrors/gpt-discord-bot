@@ -69,13 +69,17 @@ async def generate_completion_response(
         convo=Conversation(messages),
     )
     rendered = prompt.full_render(MY_BOT_NAME)
+    rendered_for_responses = [
+        {"role": m["role"], "content": m["content"]}
+        for m in rendered
+    ]
 
     try:
         # Prefer Responses API; fall back to Chat Completions
         logger.info(f"Using Responses API with model {thread_config.model}")
         response = await client.responses.create(
             model=thread_config.model,
-            input=rendered,
+            input=rendered_for_responses,
             temperature=thread_config.temperature,
             max_output_tokens=thread_config.max_tokens,
         )
