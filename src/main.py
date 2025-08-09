@@ -79,7 +79,7 @@ async def on_ready():
 async def chat_command(  # noqa: N802
     int: discord.Interaction,
     message: str,
-    model: AVAILABLE_MODELS = "gpt-4o-mini",   # literal default
+    model: AVAILABLE_MODELS = "gpt-5",   # literal default
     temperature: Optional[float] = 1.0,
     max_tokens: Optional[int] = 512,
 ):
@@ -194,5 +194,31 @@ async def on_message(msg: DiscordMessage):
     except Exception as exc:
         logger.exception(exc)
 
+
+
+# ───────────────────────────────────────────────────────────────
+# /research command (placeholder; disabled by default)
+# ───────────────────────────────────────────────────────────────
+@tree.command(name="research", description="Research with citations (placeholder; disabled by default)")
+@discord.app_commands.checks.bot_has_permissions(
+    send_messages=True, view_channel=True, manage_threads=True
+)
+@app_commands.describe(
+    query="What do you want me to research?",
+    depth="How deep to go (1-3)"
+)
+async def research_command(int: discord.Interaction, query: str, depth: Optional[int] = 1):  # noqa: N802
+    from src.constants import RESEARCH_ENABLED
+    if not isinstance(int.channel, discord.TextChannel):
+        return
+    if should_block(int.guild):
+        return
+    if not RESEARCH_ENABLED:
+        await int.response.send_message(
+            "Research mode is disabled in this build. Set `RESEARCH_ENABLED=true` to enable (tools will be wired in a later patch).",
+            ephemeral=True
+        )
+        return
+    await int.response.send_message("Research mode scaffold enabled, but tools not wired yet. Coming soon.", ephemeral=True)
 # ───────────────────────────────────────────────────────────────
 client.run(DISCORD_BOT_TOKEN)

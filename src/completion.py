@@ -2,6 +2,7 @@
 from enum import Enum
 from dataclasses import dataclass
 from typing import Optional, List, Dict
+import os
 
 import openai
 from openai import AsyncOpenAI
@@ -31,6 +32,27 @@ class CompletionData:
 
 client = AsyncOpenAI()
 
+async def _responses_text(resp) -> str:
+    """Extract text from Responses API object across SDK versions."""
+    try:
+        t = resp.output_text
+        if t:
+            return t
+    except Exception:
+        pass
+    try:
+        parts = getattr(resp, "output", None) or []
+        out = []
+        for p in parts:
+            for c in getattr(p, "content", []) or []:
+                if getattr(c, "type", "") == "output_text" and getattr(c, "text", None):
+                    out.append(c.text)
+        if out:
+            return "".join(out)
+    except Exception:
+        pass
+    return str(resp)
+
 # ───────────────────────────────────────────────────────────────
 # Internal store for "continue" payloads keyed by (guild_id, thread_id)
 PENDING_REPLIES: Dict[tuple[int, int], List[str]] = {}
@@ -49,15 +71,14 @@ async def generate_completion_response(
     rendered = prompt.full_render(MY_BOT_NAME)
 
     try:
-        response = await client.chat.completions.create(
+        # Prefer Responses API; fall back to Chat Completions
+        response = await client.responses.create(
             model=thread_config.model,
             messages=rendered,
             temperature=thread_config.temperature,
-            top_p=1.0,
-            max_tokens=thread_config.max_tokens,
-            stop=["<|endoftext|>"],
+            max_output_tokens=thread_config.max_tokens,
         )
-        reply = response.choices[0].message.content.strip()
+        reply = (await _responses_text(response)).strip()
         return CompletionData(CompletionResult.OK, reply, None)
 
     except openai.BadRequestError as e:
@@ -66,8 +87,21 @@ async def generate_completion_response(
         return CompletionData(CompletionResult.INVALID_REQUEST, None, str(e))
 
     except Exception as e:
-        logger.exception(e)
-        return CompletionData(CompletionResult.OTHER_ERROR, None, str(e))
+        # Fallback to legacy Chat Completions
+        try:
+            response = await client.chat.completions.create(
+                model=thread_config.model,
+                messages=rendered,
+                temperature=thread_config.temperature,
+                top_p=1.0,
+                max_tokens=thread_config.max_tokens,
+                stop=["<|endoftext|>"],
+            )
+            reply = response.choices[0].message.content.strip()
+            return CompletionData(CompletionResult.OK, reply, None)
+        except Exception as e2:
+            logger.exception(e2)
+            return CompletionData(CompletionResult.OTHER_ERROR, None, f"{e} / fallback: {e2}")
 
 # ───────────────────────────────────────────────────────────────
 async def process_response(
@@ -139,16 +173,28 @@ async def generate_title(prompt: str) -> str:
         "No hashtags, no quotes, no trailing punctuation."
     )
 
-    resp = await client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=16,      # ~48 characters max
-        temperature=0.7,
-        top_p=0.9,
-    )
-    title = resp.choices[0].message.content.strip().replace("\n", " ")
+    try:
+        resp = await client.responses.create(
+            model=os.getenv("OPENAI_MODEL_CHEAP", "gpt-5-mini"),
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ],
+            max_output_tokens=32,      # ~48 characters max
+            temperature=0.7,
+        )
+        title = (await _responses_text(resp)).strip().replace("\n", " ")
+    except Exception:
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=16,
+            temperature=0.7,
+            top_p=0.9,
+        )
+        title = resp.choices[0].message.content.strip().replace("\n", " ")
     return title[:40]  # hard cap
 

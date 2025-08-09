@@ -47,7 +47,20 @@ def is_last_message_stale(
 
 
 async def close_thread(thread: discord.Thread):
-    await thread.edit(name=INACTIVATE_THREAD_PREFIX)
+    # Preserve existing title while swapping active→inactive prefix
+    from src.constants import ACTIVATE_THREAD_PREFX, INACTIVATE_THREAD_PREFIX
+    try:
+        current = thread.name or ""
+        title = current
+        if current.startswith(ACTIVATE_THREAD_PREFX):
+            title = current[len(ACTIVATE_THREAD_PREFX):].lstrip()
+        elif current.startswith(INACTIVATE_THREAD_PREFIX):
+            title = current[len(INACTIVATE_THREAD_PREFIX):].lstrip()
+        new_name = f"{INACTIVATE_THREAD_PREFIX} {title}" if title else INACTIVATE_THREAD_PREFIX
+        await thread.edit(name=new_name)
+    except Exception:
+        # Fallback to prefix only
+        await thread.edit(name=INACTIVATE_THREAD_PREFIX)
     await thread.send(
         embed=discord.Embed(
             description="**Thread closed** - Context limit reached, closing...",
